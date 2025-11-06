@@ -1,0 +1,205 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: event-store
+
+---
+# Headless Service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: event-store
+  namespace: event-store
+spec:
+  clusterIP: None
+  selector:
+    app: event-store
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+
+---
+# Service for external access (LoadBalancer or NodePort)
+apiVersion: v1
+kind: Service
+metadata:
+  name: event-store-external
+  namespace: event-store
+spec:
+  type: NodePort
+  selector:
+    app: event-store
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    nodePort: 30080
+
+---
+# StatefulSet for Event Store
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: event-store
+  namespace: event-store
+spec:
+  serviceName: event-store
+  replicas: 3
+  selector:
+    matchLabels:
+      app: event-store
+  template:
+    metadata:
+      labels:
+        app: event-store
+    spec:
+      containers:
+      - name: event-store
+        image: event-store:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: SERVICE_NAME
+          value: "event-store"
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: HTTP_PORT
+          value: "8080"
+        - name: DATA_DIR
+          value: "/data/wal"
+        - name: ETCD_ENDPOINTS
+          value: "etcd-0.etcd.event-store.svc.cluster.local:2379,etcd-1.etcd.event-store.svc.cluster.local:2379,etcd-2.etcd.event-store.svc.cluster.local:2379"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard"
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+# etcd Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: event-store
+spec:
+  clusterIP: None
+  selector:
+    app: etcd
+  ports:
+  - name: client
+    port: 2379
+    targetPort: 2379
+  - name: peer
+    port: 2380
+    targetPort: 2380
+
+---
+# etcd StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  namespace: event-store
+spec:
+  serviceName: etcd
+  replicas: 3
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      containers:
+      - name: etcd
+        image: quay.io/coreos/etcd:v3.5.11
+        ports:
+        - name: client
+          containerPort: 2379
+        - name: peer
+          containerPort: 2380
+        env:
+        - name: ETCD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: ETCD_INITIAL_CLUSTER
+          value: "etcd-0=http://etcd-0.etcd.event-store.svc.cluster.local:2380,etcd-1=http://etcd-1.etcd.event-store.svc.cluster.local:2380,etcd-2=http://etcd-2.etcd.event-store.svc.cluster.local:2380"
+        - name: ETCD_INITIAL_CLUSTER_STATE
+          value: "new"
+        - name: ETCD_INITIAL_CLUSTER_TOKEN
+          value: "event-store-etcd"
+        - name: ETCD_LISTEN_CLIENT_URLS
+          value: "http://0.0.0.0:2379"
+        - name: ETCD_ADVERTISE_CLIENT_URLS
+          value: "http://$(ETCD_NAME).etcd.event-store.svc.cluster.local:2379"
+        - name: ETCD_LISTEN_PEER_URLS
+          value: "http://0.0.0.0:2380"
+        - name: ETCD_INITIAL_ADVERTISE_PEER_URLS
+          value: "http://$(ETCD_NAME).etcd.event-store.svc.cluster.local:2380"
+        volumeMounts:
+        - name: etcd-data
+          mountPath: /etcd-data
+        command:
+        - /usr/local/bin/etcd
+        - --data-dir=/etcd-data
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+  volumeClaimTemplates:
+  - metadata:
+      name: etcd-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard"
+      resources:
+        requests:
+          storage: 1Gi
+
